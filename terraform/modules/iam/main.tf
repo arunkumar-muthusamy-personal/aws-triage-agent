@@ -55,6 +55,7 @@ data "aws_iam_policy_document" "task_policy" {
       "logs:StartQuery",
       "logs:StopQuery",
       "logs:GetQueryResults",
+      "logs:GetLogGroupFields",      # needed for Logs Insights field discovery
     ]
     resources = ["*"]
   }
@@ -69,6 +70,7 @@ data "aws_iam_policy_document" "task_policy" {
       "cloudwatch:ListMetrics",
       "cloudwatch:DescribeAlarms",
       "cloudwatch:DescribeAlarmsForMetric",
+      "cloudwatch:DescribeAlarmHistory",   # alarm state change history
     ]
     resources = ["*"]
   }
@@ -141,8 +143,10 @@ data "aws_iam_policy_document" "task_policy" {
       "rds:DescribeDBClusters",
       "rds:DescribeDBSubnetGroups",
       "rds:DescribeDBParameterGroups",
+      "rds:DescribeDBClusterParameters",
       "rds:DescribeDBLogFiles",
       "rds:DownloadDBLogFilePortion",
+      "rds:DescribeEvents",           # 🔴 required by describe_db_events tool
       "rds:ListTagsForResource",
     ]
     resources = ["*"]
@@ -216,6 +220,7 @@ data "aws_iam_policy_document" "task_policy" {
       "sqs:GetQueueAttributes",
       "sqs:GetQueueUrl",
       "sqs:ListQueueTags",
+      "sqs:ListDeadLetterSourceQueues",  # 🔴 required by get_sqs_dead_letter_source_queues tool
     ]
     resources = ["*"]
   }
@@ -228,6 +233,7 @@ data "aws_iam_policy_document" "task_policy" {
       "sns:ListTopics",
       "sns:GetTopicAttributes",
       "sns:ListSubscriptions",
+      "sns:ListSubscriptionsByTopic",
       "sns:ListTagsForResource",
     ]
     resources = ["*"]
@@ -239,7 +245,9 @@ data "aws_iam_policy_document" "task_policy" {
     effect = "Allow"
     actions = [
       "elasticloadbalancing:DescribeLoadBalancers",
+      "elasticloadbalancing:DescribeLoadBalancerAttributes",
       "elasticloadbalancing:DescribeTargetGroups",
+      "elasticloadbalancing:DescribeTargetGroupAttributes",
       "elasticloadbalancing:DescribeTargetHealth",
       "elasticloadbalancing:DescribeListeners",
       "elasticloadbalancing:DescribeRules",
@@ -265,6 +273,7 @@ data "aws_iam_policy_document" "task_policy" {
     actions = [
       "cloudfront:ListDistributions",
       "cloudfront:GetDistribution",
+      "cloudfront:GetDistributionConfig",   # 🔴 required by get_distribution_config tool
       "cloudfront:ListInvalidations",
       "cloudfront:GetInvalidation",
     ]
@@ -296,6 +305,7 @@ data "aws_iam_policy_document" "task_policy" {
       "states:DescribeStateMachine",
       "states:ListExecutions",
       "states:DescribeExecution",
+      "states:GetExecutionHistory",   # 🔴 required by get_execution_history tool
     ]
     resources = ["*"]
   }
@@ -305,10 +315,12 @@ data "aws_iam_policy_document" "task_policy" {
     sid    = "GlueRead"
     effect = "Allow"
     actions = [
+      "glue:ListJobs",
       "glue:GetDatabases",
       "glue:GetTables",
       "glue:GetJobs",
       "glue:GetCrawlers",
+      "glue:GetCrawler",
       "glue:GetJob",
       "glue:GetJobRun",
       "glue:GetJobRuns",
@@ -324,6 +336,8 @@ data "aws_iam_policy_document" "task_policy" {
       "elasticache:DescribeCacheClusters",
       "elasticache:DescribeReplicationGroups",
       "elasticache:DescribeCacheSubnetGroups",
+      "elasticache:DescribeCacheParameters",
+      "elasticache:DescribeEvents",
       "elasticache:ListTagsForResource",
     ]
     resources = ["*"]
@@ -382,6 +396,7 @@ data "aws_iam_policy_document" "task_policy" {
       "iam:ListAttachedRolePolicies",
       "iam:ListRolePolicies",
       "iam:GetRolePolicy",
+      "iam:SimulatePrincipalPolicy",  # 🔴 required by simulate_principal_policy tool
       "iam:ListUsers",
       "iam:GetUser",
       "iam:ListGroups",
@@ -424,7 +439,19 @@ data "aws_iam_policy_document" "task_policy" {
       "ses:GetIdentityVerificationAttributes",
       "ses:GetSendQuota",
       "ses:GetSendStatistics",
+      "ses:GetAccountSendingEnabled",
       "ses:ListConfigurationSets",
+    ]
+    resources = ["*"]
+  }
+
+  # SES v2 — read
+  statement {
+    sid    = "SESv2Read"
+    effect = "Allow"
+    actions = [
+      "ses:GetAccount",                   # sesv2 uses ses: prefix in IAM
+      "ses:ListSuppressedDestinations",
     ]
     resources = ["*"]
   }
@@ -456,7 +483,7 @@ data "aws_iam_policy_document" "task_policy" {
     resources = ["*"]
   }
 
-  # Resource Tagging
+  # Resource Tagging + Resource Groups
   statement {
     sid    = "TaggingRead"
     effect = "Allow"
@@ -464,6 +491,9 @@ data "aws_iam_policy_document" "task_policy" {
       "tag:GetResources",
       "tag:GetTagKeys",
       "tag:GetTagValues",
+      "resource-groups:ListGroups",
+      "resource-groups:GetGroup",
+      "resource-groups:GetGroupQuery",
     ]
     resources = ["*"]
   }
