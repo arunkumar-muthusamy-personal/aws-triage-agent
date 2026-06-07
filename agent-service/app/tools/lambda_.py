@@ -6,6 +6,7 @@ from botocore.exceptions import ClientError
 from langchain_core.tools import tool
 
 from app.config import settings
+from app.tools.time_utils import parse_aws_datetime
 
 
 @tool
@@ -104,8 +105,8 @@ def get_lambda_metrics(
     try:
         cw_client = boto3.client("cloudwatch", region_name=settings.aws_region)
         now = datetime.now(timezone.utc)
-        start = datetime.fromisoformat(start_time) if start_time else now - timedelta(hours=1)
-        end = datetime.fromisoformat(end_time) if end_time else now
+        start = parse_aws_datetime(start_time, now - timedelta(hours=1))
+        end = parse_aws_datetime(end_time, now)
 
         dimensions = [{"Name": "FunctionName", "Value": function_name}]
 

@@ -1,11 +1,22 @@
 import uuid
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
 
 from app.config import settings
+
+
+def _to_dynamodb_value(value):
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, list):
+        return [_to_dynamodb_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _to_dynamodb_value(item) for key, item in value.items()}
+    return value
 
 
 class SessionManager:
@@ -107,7 +118,7 @@ class SessionManager:
             "message_count": 0,
             "ttl_expiry": self._ttl(),
         }
-        self._sessions_table.put_item(Item=item)
+        self._sessions_table.put_item(Item=_to_dynamodb_value(item))
         return item
 
     def get_session(self, session_id: str) -> Optional[dict]:
@@ -185,7 +196,7 @@ class SessionManager:
         if tokens_used is not None:
             item["tokens_used"] = tokens_used
 
-        self._messages_table.put_item(Item=item)
+        self._messages_table.put_item(Item=_to_dynamodb_value(item))
 
         # Update message count and updated_at on session
         # Best-effort — ignore errors

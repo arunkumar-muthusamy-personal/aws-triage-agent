@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import boto3
@@ -6,6 +6,7 @@ from botocore.exceptions import ClientError
 from langchain_core.tools import tool
 
 from app.config import settings
+from app.tools.time_utils import parse_aws_datetime
 
 
 @tool
@@ -37,8 +38,8 @@ def get_metric_statistics(
             Namespace=namespace,
             MetricName=metric_name,
             Dimensions=dimensions,
-            StartTime=datetime.fromisoformat(start_time),
-            EndTime=datetime.fromisoformat(end_time),
+            StartTime=parse_aws_datetime(start_time, datetime.now(timezone.utc)),
+            EndTime=parse_aws_datetime(end_time, datetime.now(timezone.utc)),
             Period=period,
             Statistics=statistics,
         )

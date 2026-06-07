@@ -1,5 +1,5 @@
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import boto3
@@ -7,6 +7,7 @@ from botocore.exceptions import ClientError
 from langchain_core.tools import tool
 
 from app.config import settings
+from app.tools.time_utils import parse_aws_datetime
 
 
 @tool
@@ -31,8 +32,9 @@ def query_cloudwatch_logs(
     """
     try:
         client = boto3.client("logs", region_name=settings.aws_region)
-        start_ts = int(datetime.fromisoformat(start_time).timestamp())
-        end_ts = int(datetime.fromisoformat(end_time).timestamp())
+        now = datetime.now(timezone.utc)
+        start_ts = int(parse_aws_datetime(start_time, now).timestamp())
+        end_ts = int(parse_aws_datetime(end_time, now).timestamp())
 
         response = client.start_query(
             logGroupName=log_group_name,
@@ -122,9 +124,9 @@ def get_log_events(
             "startFromHead": True,
         }
         if start_time:
-            kwargs["startTime"] = int(datetime.fromisoformat(start_time).timestamp() * 1000)
+            kwargs["startTime"] = int(parse_aws_datetime(start_time, datetime.now(timezone.utc)).timestamp() * 1000)
         if end_time:
-            kwargs["endTime"] = int(datetime.fromisoformat(end_time).timestamp() * 1000)
+            kwargs["endTime"] = int(parse_aws_datetime(end_time, datetime.now(timezone.utc)).timestamp() * 1000)
 
         response = client.get_log_events(**kwargs)
         events = [
@@ -168,9 +170,9 @@ def filter_log_events(
             "limit": limit,
         }
         if start_time:
-            kwargs["startTime"] = int(datetime.fromisoformat(start_time).timestamp() * 1000)
+            kwargs["startTime"] = int(parse_aws_datetime(start_time, datetime.now(timezone.utc)).timestamp() * 1000)
         if end_time:
-            kwargs["endTime"] = int(datetime.fromisoformat(end_time).timestamp() * 1000)
+            kwargs["endTime"] = int(parse_aws_datetime(end_time, datetime.now(timezone.utc)).timestamp() * 1000)
         if log_stream_names:
             kwargs["logStreamNames"] = log_stream_names
 
