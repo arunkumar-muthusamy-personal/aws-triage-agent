@@ -78,16 +78,21 @@ def get_dynamodb_metrics(
 
         result: dict = {}
         for metric_name, statistics in metrics:
-            response = cw_client.get_metric_statistics(
-                Namespace="AWS/DynamoDB",
-                MetricName=metric_name,
-                Dimensions=[{"Name": "TableName", "Value": table_name}],
-                StartTime=start,
-                EndTime=end,
-                Period=period,
-                Statistics=[s for s in statistics if s != "p99"],
-                ExtendedStatistics=["p99"] if "p99" in statistics else [],
-            )
+            std_stats = [s for s in statistics if s != "p99"]
+            ext_stats = ["p99"] if "p99" in statistics else []
+            kwargs = {
+                "Namespace": "AWS/DynamoDB",
+                "MetricName": metric_name,
+                "Dimensions": [{"Name": "TableName", "Value": table_name}],
+                "StartTime": start,
+                "EndTime": end,
+                "Period": period,
+            }
+            if std_stats:
+                kwargs["Statistics"] = std_stats
+            if ext_stats:
+                kwargs["ExtendedStatistics"] = ext_stats
+            response = cw_client.get_metric_statistics(**kwargs)
             result[metric_name] = sorted(
                 [
                     {

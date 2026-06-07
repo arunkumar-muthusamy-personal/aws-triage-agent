@@ -97,16 +97,19 @@ def get_api_gateway_metrics(
         for metric_name, statistics in metrics_config:
             std_stats = [s for s in statistics if s != "p99"]
             ext_stats = ["p99"] if "p99" in statistics else []
-            response = cw_client.get_metric_statistics(
-                Namespace="AWS/ApiGateway",
-                MetricName=metric_name,
-                Dimensions=dimensions,
-                StartTime=start,
-                EndTime=end,
-                Period=period,
-                Statistics=std_stats,
-                ExtendedStatistics=ext_stats,
-            )
+            kwargs = {
+                "Namespace": "AWS/ApiGateway",
+                "MetricName": metric_name,
+                "Dimensions": dimensions,
+                "StartTime": start,
+                "EndTime": end,
+                "Period": period,
+            }
+            if std_stats:
+                kwargs["Statistics"] = std_stats
+            if ext_stats:
+                kwargs["ExtendedStatistics"] = ext_stats
+            response = cw_client.get_metric_statistics(**kwargs)
             result[metric_name] = sorted(
                 [
                     {
