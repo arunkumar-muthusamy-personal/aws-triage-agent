@@ -1,0 +1,11 @@
+aws_region          = "us-east-1"
+environment         = "prod"
+project_name        = "aws-triage-agent"
+vpc_id              = ""   # Fill in before apply
+private_subnet_ids  = []   # Fill in before apply
+public_subnet_ids   = []   # Fill in before apply
+use_vpc_endpoints   = true
+ecs_cpu             = 1024
+ecs_memory          = 2048
+session_ttl_days    = 30
+max_tool_iterations = 15

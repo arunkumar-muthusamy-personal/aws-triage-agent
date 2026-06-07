@@ -1,0 +1,52 @@
+services:
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: dynamodb
+    volumes:
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  agent:
+    build:
+      context: ./agent-service
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env.local
+    environment:
+      # Infrastructure connection vars — these are fixed for the local dev stack.
+      # All other config (LLM provider, API keys, AWS creds, MOCK_AWS) comes from .env.local
+      AWS_REGION: us-east-1
+      DYNAMODB_TABLE_SESSIONS: triage-sessions
+      DYNAMODB_TABLE_MESSAGES: triage-messages
+      BEDROCK_MODEL_ID: anthropic.claude-sonnet-4-20250514-v1:0
+      MAX_TOOL_ITERATIONS: "15"
+      DYNAMODB_ENDPOINT_URL: http://localstack:4566
+    depends_on:
+      localstack:
+        condition: service_healthy
+    volumes:
+      - ./agent-service/app:/app/app
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile.dev
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8000
+    volumes:
+      - ./ui:/app
+      - /app/node_modules
+
+volumes:
+  localstack_data:

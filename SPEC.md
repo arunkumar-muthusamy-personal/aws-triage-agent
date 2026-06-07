@@ -1,6 +1,6 @@
 # AWS Triage Agent — Application Specification
 
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Status:** Design / Pre-Build  
 **Owner:** Infrastructure / Platform Team  
 
@@ -23,6 +23,7 @@ A conversational AI triage agent that acts as an intelligent on-call assistant. 
 - **Clarification-first.** When intent is ambiguous, the agent asks targeted clarifying questions before issuing any AWS API calls.
 - **Reproducible infrastructure.** Everything deployable via Terraform; no click-ops.
 - **Audit trail.** Every tool invocation and its raw output are stored, accessible, and surfaced in the UI.
+- **Portable build.** The agent is built and tested locally (Docker Compose + LocalStack), committed to GitHub, and pulled into the target AWS environment for deployment. No direct AWS access is required during development.
 
 ---
 
@@ -37,7 +38,7 @@ A conversational AI triage agent that acts as an intelligent on-call assistant. 
 │  │  Chat UI  (React SPA, served via CloudFront + S3)        │  │
 │  └────────────────────┬─────────────────────────────────────┘  │
 └───────────────────────│─────────────────────────────────────────┘
-                        │ HTTPS / WebSocket (API Gateway)
+                        │ HTTPS / SSE (API Gateway HTTP API)
 ┌───────────────────────▼─────────────────────────────────────────┐
 │  AWS ECS Fargate Cluster                                        │
 │  ┌──────────────────────────────────────────────────────────┐  │
@@ -51,12 +52,12 @@ A conversational AI triage agent that acts as an intelligent on-call assistant. 
 │  │                       │  │  - CW Logs Insights  │   │  │  │
 │  │                       │  │  - CW Metrics        │   │  │  │
 │  │                       │  │  - ECS Describe      │   │  │  │
-│  │                       │  │  - EC2 Describe      │   │  │  │
+│  │                       │  │  - EC2/VPC/SG/Subnet │   │  │  │
 │  │                       │  │  - RDS Describe      │   │  │  │
 │  │                       │  │  - ELB Describe      │   │  │  │
 │  │                       │  │  - Lambda Describe   │   │  │  │
 │  │                       │  │  - CloudTrail Events │   │  │  │
-│  │                       │  │  - SSM Get Parameter │   │  │  │
+│  │                       │  │  - SSM Parameters    │   │  │  │
 │  │                       │  │  - SQS Attributes    │   │  │  │
 │  │                       │  └──────────────────────┘   │  │  │
 │  │                       └──────────────────────────────┘  │  │
@@ -72,9 +73,9 @@ A conversational AI triage agent that acts as an intelligent on-call assistant. 
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| Chat UI | React + TypeScript + Tailwind | Browser interface for triage conversations |
+| Chat UI | React + TypeScript + Tailwind + Chatscope UI Kit | Simple chat interface; pre-built components to minimise frontend dev work |
 | Static Hosting | S3 + CloudFront | Serve the SPA globally |
-| API Layer | API Gateway (HTTP API + WebSocket) | Route chat messages; stream agent responses |
+| API Layer | API Gateway (HTTP API) | Route chat messages; stream agent responses via SSE |
 | Agent Service | FastAPI + LangGraph + Python | Core agentic loop + tool execution |
 | LLM | AWS Bedrock (Claude claude-sonnet-4-20250514) | Reasoning, tool-call orchestration, diagnosis |
 | Conversation State | DynamoDB | Persist session history, tool call logs |
@@ -82,6 +83,20 @@ A conversational AI triage agent that acts as an intelligent on-call assistant. 
 | Container Registry | ECR | Agent Docker image |
 | Secrets | AWS Secrets Manager | API keys, config (if any) |
 | Observability | CloudWatch Logs + X-Ray | Agent's own telemetry |
+| Local Dev | Docker Compose + LocalStack | Run the full stack locally without an AWS account |
+
+### 2.3 Deployment Model
+
+The agent codebase is developed and tested **locally** (Docker Compose + LocalStack), then:
+
+```
+Local dev (Docker Compose + LocalStack)
+  → git push to GitHub
+  → GitHub Actions CI (lint, test, docker build, push to ECR)
+  → Pull into target AWS environment → terraform apply → ECS deploy
+```
+
+The **developer does not need access to the target AWS account**. The target environment pulls the image from ECR and runs it. AWS credentials for the target account are stored as GitHub Actions secrets and used only in CI/CD.
 
 ---
 
@@ -204,14 +219,14 @@ RESPONSE FORMAT for final diagnosis:
 
 Each tool is a Python function wrapped as a LangChain `@tool`. All tools are **read-only**. Tools are grouped by AWS service; the source file mapping is shown in Section 8.
 
-**Coverage summary (24 AWS services → 55 tools):**
+**Coverage summary (26 services → 62 tools):**
 
 | # | Service | Tools | File |
 |---|---------|-------|------|
 | 1 | CloudWatch Logs | 4 | `cloudwatch_logs.py` |
 | 2 | CloudWatch Metrics & Alarms | 3 | `cloudwatch_metrics.py` |
 | 3 | ECS (Fargate + EC2 launch type) | 5 | `ecs.py` |
-| 4 | EC2 | 4 | `ec2.py` |
+| 4 | EC2 + VPC + Subnets + Security Groups + ASG | 5 | `ec2.py` |
 | 5 | RDS / Aurora | 4 | `rds.py` |
 | 6 | DynamoDB | 3 | `dynamodb.py` |
 | 7 | S3 | 4 | `s3.py` |
@@ -221,7 +236,7 @@ Each tool is a Python function wrapped as a LangChain `@tool`. All tools are **r
 | 11 | API Gateway | 3 | `apigw.py` |
 | 12 | CloudFront | 2 | `cloudfront.py` |
 | 13 | Lambda | 3 | `lambda_.py` |
-| 14 | Step Functions | 3 | `stepfunctions.py` |
+| 14 | Step Functions | 4 | `stepfunctions.py` |
 | 15 | AWS Glue | 3 | `glue.py` |
 | 16 | ElastiCache | 2 | `elasticache.py` |
 | 17 | ECR | 2 | `ecr.py` |
@@ -232,7 +247,8 @@ Each tool is a Python function wrapped as a LangChain `@tool`. All tools are **r
 | 22 | Route 53 | 2 | `route53.py` |
 | 23 | SES | 2 | `ses.py` |
 | 24 | CloudTrail | 2 | `cloudtrail.py` |
-| 25 | Resource Tagging (discovery) | 1 | `tagging.py` |
+| 25 | SSM Parameter Store | 2 | `ssm.py` |
+| 26 | Resource Tagging (discovery) | 1 | `tagging.py` |
 
 ---
 
@@ -375,7 +391,7 @@ Output:
 
 ---
 
-### 4.4 EC2 Tools
+### 4.4 EC2 / VPC / Networking Tools
 
 #### `describe_instances`
 ```python
@@ -400,7 +416,18 @@ Output:
 Input:
   vpc_ids: list[str] = None
 Output:
-  vpcs: list[VPCSummary]
+  vpcs: list[VPCSummary]       # CIDR, state, tags, DHCP options
+```
+
+#### `describe_subnets`
+```python
+Input:
+  subnet_ids: list[str] = None
+  filters: list[Filter] = None  # e.g. vpc-id, availability-zone
+Output:
+  subnets: list[SubnetSummary]
+  # subnet_id, vpc_id, cidr_block, availability_zone,
+  # available_ip_count, map_public_ip_on_launch, tags
 ```
 
 #### `describe_autoscaling_groups`
@@ -740,18 +767,17 @@ Input:
 Output:
   executions: list[ExecutionSummary]
   # execution ARN, name, status, start/stop time
-
-# Follow-up: get_execution_history(execution_arn) for full event trace
 ```
 
 #### `get_execution_history`
 ```python
+# Separate registered tool — fetches the full step-by-step event trace for one execution
 Input:
   execution_arn: str
   max_results: int = 100
 Output:
   events: list[ExecutionEvent]
-  # Full step-by-step event trace including failed state details and cause/error fields
+  # Full event trace including failed state details, cause, and error fields
 ```
 
 ---
@@ -985,7 +1011,35 @@ Output:
 
 ---
 
-### 4.25 Resource Discovery Tool
+### 4.25 SSM Parameter Store Tools
+
+#### `describe_ssm_parameters`
+```python
+# Lists parameter metadata — parameter values are NOT retrieved
+Input:
+  filters: list[ParameterFilter] = None  # e.g. Name contains "/prod/myapp"
+  max_results: int = 50
+Output:
+  parameters: list[ParameterMetadata]
+  # name, type (String|StringList|SecureString), last_modified, ARN, tier
+  # NOTE: SecureString values are NEVER fetched
+```
+
+#### `get_parameters_by_path`
+```python
+# Returns plaintext String/StringList parameters under a path prefix
+# SecureString parameters are returned with Value="[REDACTED]"
+Input:
+  path: str                    # e.g. /prod/myapp/
+  recursive: bool = True
+Output:
+  parameters: list[Parameter]
+  # name, type, value (SecureString values redacted), version, last_modified
+```
+
+---
+
+### 4.26 Resource Discovery Tool
 
 #### `list_tagged_resources`
 ```python
@@ -1002,22 +1056,28 @@ Output:
 
 ## 5. Chat Interface
 
-### 5.1 Features
+### 5.1 UI Philosophy
+
+The UI is a **minimal chat interface** — the value is in the agent's intelligence, not the frontend. To minimise frontend development effort, the UI uses [`@chatscope/chat-ui-kit-react`](https://chatscope.io/) for pre-built chat components (message list, input box, typing indicator) and adds only the custom pieces the spec requires (session sidebar, Evidence Trail panel).
+
+No custom design system. Tailwind for layout and dark theme only.
+
+### 5.2 Features
 
 | Feature | Description |
 |---------|-------------|
 | Conversation threads | Each triage session is a named thread; threads are persisted |
-| Streaming responses | Agent tokens and tool-call events stream in real time |
+| Streaming responses | Agent tokens stream in real time via SSE |
 | Tool call transparency | Collapsible "Evidence Trail" panel shows every tool invoked, its inputs, and outputs |
 | Markdown rendering | Diagnosis responses render code blocks, tables, lists |
 | Copy to clipboard | One-click copy for Terraform snippets, commands, log queries |
-| Session history | Left sidebar lists prior sessions by date/description |
+| Session history | Left sidebar lists prior sessions; title is the first 80 chars of the user's opening message |
 | New session | Button to start a fresh triage thread |
-| Dark mode | Terminal-aesthetic dark theme appropriate for ops use |
+| Dark mode | Terminal-aesthetic dark theme |
 
-### 5.2 Streaming Protocol
+### 5.3 Streaming Protocol
 
-Uses **Server-Sent Events (SSE)** over HTTP (API Gateway HTTP API) for simplicity and reliability over WebSocket.
+Uses **Server-Sent Events (SSE)** over HTTP (API Gateway HTTP API).
 
 Event types streamed from agent to UI:
 
@@ -1038,7 +1098,7 @@ event: done
 data: {"session_id": "sess_abc123", "total_tokens": 4821}
 ```
 
-### 5.3 UI Layout
+### 5.4 UI Layout
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -1048,7 +1108,7 @@ data: {"session_id": "sess_abc123", "total_tokens": 4821}
 │              ├─────────────────────────────────────────────────┤
 │ > Today      │                                                  │
 │   ECS OOM    │   ┌─────────────────────────────────────────┐  │
-│   RDS slow   │   │ 🤖 Agent                                │  │
+│   RDS slow   │   │ Agent                                   │  │
 │              │   │ I can see the payment-service ECS tasks  │  │
 │ > Yesterday  │   │ are stopping with exit code 137 (OOM).   │  │
 │   Lambda err │   │                                          │  │
@@ -1064,7 +1124,7 @@ data: {"session_id": "sess_abc123", "total_tokens": 4821}
 │              │   │  was 498MB before OOM kill.              │  │
 │              │   │                                          │  │
 │              │   │  Recommended Fix (Terraform):            │  │
-│              │   │  ```hcl                                   │  │
+│              │   │  ```hcl                                  │  │
 │              │   │  memory = 1024                           │  │
 │              │   │  ```                              [Copy] │  │
 │              │   └─────────────────────────────────────────┘  │
@@ -1083,13 +1143,13 @@ data: {"session_id": "sess_abc123", "total_tokens": 4821}
 **Table: `triage-sessions`**
 
 ```
-PK: user_id#{user_id}
+PK: user#{user_id}
 SK: session#{session_id}
 
 Attributes:
   session_id: str (UUID)
-  user_id: str
-  title: str                 # Auto-generated from first message
+  user_id: str               # Anonymous UUID stored in browser localStorage until auth is added
+  title: str                 # First 80 chars of the user's opening message
   created_at: ISO8601
   updated_at: ISO8601
   status: ACTIVE | CLOSED
@@ -1115,6 +1175,10 @@ Attributes:
 
 **GSI:** `user-sessions-index` on `user_id` + `created_at` for session listing.
 
+### 6.2 User Identity (Pre-Auth)
+
+Until Okta SSO is integrated, `user_id` is a random UUID generated on first visit and stored in browser `localStorage`. Each browser instance gets its own isolated session namespace. When Okta is added, the UUID is replaced by the Okta `sub` claim with no schema changes required.
+
 ---
 
 ## 7. Infrastructure (Terraform)
@@ -1129,7 +1193,7 @@ terraform/
 ├── providers.tf
 │
 ├── modules/
-│   ├── networking/           # VPC, subnets, SGs (or uses existing)
+│   ├── networking/           # Data-only lookups on existing VPC/subnets/SGs
 │   ├── ecs/                  # ECS cluster, Fargate task def, service
 │   ├── api_gateway/          # HTTP API + SSE routes
 │   ├── frontend/             # S3 bucket + CloudFront distribution
@@ -1162,11 +1226,12 @@ resource "aws_ecs_task_definition" "triage_agent" {
     image = "${aws_ecr_repository.triage_agent.repository_url}:latest"
     portMappings = [{ containerPort = 8000 }]
     environment = [
-      { name = "AWS_REGION",         value = var.aws_region },
-      { name = "DYNAMODB_TABLE_SESSIONS", value = aws_dynamodb_table.sessions.name },
-      { name = "DYNAMODB_TABLE_MESSAGES", value = aws_dynamodb_table.messages.name },
-      { name = "BEDROCK_MODEL_ID",   value = "anthropic.claude-sonnet-4-20250514-v1:0" },
-      { name = "MAX_TOOL_ITERATIONS", value = "15" }
+      { name = "AWS_REGION",               value = var.aws_region },
+      { name = "DYNAMODB_TABLE_SESSIONS",  value = aws_dynamodb_table.sessions.name },
+      { name = "DYNAMODB_TABLE_MESSAGES",  value = aws_dynamodb_table.messages.name },
+      { name = "BEDROCK_MODEL_ID",         value = "anthropic.claude-sonnet-4-20250514-v1:0" },
+      { name = "MAX_TOOL_ITERATIONS",      value = "15" },
+      { name = "USE_VPC_ENDPOINTS",        value = tostring(var.use_vpc_endpoints) }
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -1183,29 +1248,6 @@ resource "aws_ecs_task_definition" "triage_agent" {
 ### 7.3 Agent IAM Role Policy
 
 ```hcl
-# Read-only policy for CloudWatch Logs
-resource "aws_iam_role_policy" "cloudwatch_logs" {
-  role = aws_iam_role.agent_task_role.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "logs:DescribeLogGroups",
-        "logs:DescribeLogStreams",
-        "logs:GetLogEvents",
-        "logs:FilterLogEvents",
-        "logs:StartQuery",
-        "logs:StopQuery",
-        "logs:GetQueryResults",
-        "logs:GetLogGroupFields",
-      ]
-      Resource = "*"
-    }]
-  })
-}
-
-# Read-only policy for AWS service APIs — covers all monitored services
 resource "aws_iam_role_policy" "aws_read_only" {
   role = aws_iam_role.agent_task_role.id
   policy = jsonencode({
@@ -1227,7 +1269,7 @@ resource "aws_iam_role_policy" "aws_read_only" {
         "ecs:DescribeClusters", "ecs:DescribeServices",
         "ecs:DescribeTasks", "ecs:DescribeTaskDefinition",
         "ecs:DescribeContainerInstances", "ecs:ListContainerInstances",
-        # EC2
+        # EC2 / VPC / Networking
         "ec2:DescribeInstances", "ec2:DescribeSecurityGroups",
         "ec2:DescribeVpcs", "ec2:DescribeSubnets",
         "ec2:DescribeNetworkInterfaces",
@@ -1313,11 +1355,11 @@ resource "aws_iam_role_policy" "aws_read_only" {
         # CloudTrail
         "cloudtrail:LookupEvents", "cloudtrail:GetTrailStatus",
         "cloudtrail:DescribeTrails",
-        # SSM (parameter names only — no SecureString values)
-        "ssm:DescribeParameters", "ssm:GetParametersByPath",
+        # SSM Parameter Store (plaintext only — no SecureString values)
+        "ssm:DescribeParameters",
+        "ssm:GetParametersByPath",
         # Resource Groups Tagging (cross-service discovery)
         "tag:GetResources", "tag:GetTagKeys", "tag:GetTagValues",
-        # Resource Groups
         "resource-groups:ListGroups",
         "resource-groups:GetGroup",
       ]
@@ -1363,18 +1405,18 @@ resource "aws_iam_role_policy" "bedrock" {
 
 The agent runs in an **existing VPC** injected via Terraform input variables — no new VPC is created. The networking module performs **data-only lookups** using `aws_vpc`, `aws_subnets`, and `aws_security_group` data sources.
 
-The agent Fargate task runs in **existing private subnets** with no direct internet exposure. API Gateway is the only ingress point via a VPC Link. VPC interface endpoints for Bedrock, DynamoDB, CloudWatch, ECR, and SSM are created only if they don't already exist (use `aws_vpc_endpoint` with a `lifecycle { prevent_destroy = true }` guard or a separate `create_vpc_endpoints` toggle variable).
+**VPC endpoint strategy:** The `use_vpc_endpoints` variable controls whether the agent routes AWS API calls through VPC interface endpoints. Set to `false` if endpoints don't exist and NAT/internet access is available instead. The agent works correctly either way.
 
 ```
 Internet → CloudFront (SPA) → S3
 Internet → API Gateway (HTTP API) → VPC Link → ALB → ECS Fargate (existing private subnet)
 
-ECS Fargate (private) → VPC Endpoint → Bedrock
-ECS Fargate (private) → VPC Endpoint → DynamoDB
-ECS Fargate (private) → VPC Endpoint → CloudWatch / ECR / SSM
+ECS Fargate (private) → [VPC Endpoint if use_vpc_endpoints=true] → Bedrock
+ECS Fargate (private) → [VPC Endpoint if use_vpc_endpoints=true] → DynamoDB
+ECS Fargate (private) → [VPC Endpoint if use_vpc_endpoints=true] → CloudWatch / ECR / SSM
 ```
 
-**Required Terraform input variables for networking:**
+**Required Terraform input variables:**
 
 ```hcl
 variable "vpc_id" {
@@ -1392,8 +1434,8 @@ variable "public_subnet_ids" {
   type        = list(string)
 }
 
-variable "create_vpc_endpoints" {
-  description = "Set to false if VPC endpoints for Bedrock/DynamoDB/CW already exist"
+variable "use_vpc_endpoints" {
+  description = "Route AWS API calls through VPC interface endpoints. Set false if endpoints don't exist and NAT/internet is available."
   type        = bool
   default     = true
 }
@@ -1425,7 +1467,7 @@ agent-service/
 │   │   ├── cloudwatch_logs.py        # 4.1  — CW Logs Insights
 │   │   ├── cloudwatch_metrics.py     # 4.2  — CW Metrics & Alarms
 │   │   ├── ecs.py                    # 4.3  — ECS (Fargate + EC2 launch type)
-│   │   ├── ec2.py                    # 4.4  — EC2 + Auto Scaling
+│   │   ├── ec2.py                    # 4.4  — EC2 + VPC + Subnets + SGs + ASG
 │   │   ├── rds.py                    # 4.5  — RDS / Aurora PostgreSQL
 │   │   ├── dynamodb.py               # 4.6  — DynamoDB
 │   │   ├── s3.py                     # 4.7  — S3 + bucket policies
@@ -1435,7 +1477,7 @@ agent-service/
 │   │   ├── apigw.py                  # 4.11 — API Gateway
 │   │   ├── cloudfront.py             # 4.12 — CloudFront
 │   │   ├── lambda_.py                # 4.13 — Lambda
-│   │   ├── stepfunctions.py          # 4.14 — Step Functions
+│   │   ├── stepfunctions.py          # 4.14 — Step Functions (4 tools)
 │   │   ├── glue.py                   # 4.15 — AWS Glue
 │   │   ├── elasticache.py            # 4.16 — ElastiCache (Redis/Memcached)
 │   │   ├── ecr.py                    # 4.17 — ECR
@@ -1446,7 +1488,8 @@ agent-service/
 │   │   ├── route53.py                # 4.22 — Route 53 hosted zones + records
 │   │   ├── ses.py                    # 4.23 — SES sending stats + quota
 │   │   ├── cloudtrail.py             # 4.24 — CloudTrail events
-│   │   └── tagging.py                # 4.25 — Resource Groups Tagging API
+│   │   ├── ssm.py                    # 4.25 — SSM Parameter Store (no SecureString values)
+│   │   └── tagging.py                # 4.26 — Resource Groups Tagging API
 │   │
 │   ├── memory/
 │   │   ├── dynamodb_checkpointer.py  # LangGraph DynamoDB checkpointer
@@ -1483,31 +1526,162 @@ class AgentState(TypedDict):
 
 ---
 
-## 9. Security Considerations
+## 9. Local Development (Docker Compose + LocalStack)
+
+### 9.1 Overview
+
+Developers run the full stack locally using Docker Compose. LocalStack emulates the AWS services needed for the agent's own infrastructure (DynamoDB session tables). For the **target AWS services being triaged** (CloudWatch, ECS, RDS, etc.), the agent points to a real AWS account via injected credentials — or uses LocalStack's mock responses for unit testing the tool layer.
+
+```
+docker compose up
+  → triage-agent (FastAPI, port 8000)
+  → localstack    (DynamoDB, port 4566)
+  → ui-dev        (Vite dev server, port 5173)
+```
+
+### 9.2 docker-compose.yml (Local Dev)
+
+```yaml
+version: "3.9"
+
+services:
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: dynamodb
+      DEFAULT_REGION: us-east-1
+    volumes:
+      - localstack_data:/var/lib/localstack
+
+  agent:
+    build:
+      context: ./agent-service
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      AWS_REGION: us-east-1
+      DYNAMODB_TABLE_SESSIONS: triage-sessions
+      DYNAMODB_TABLE_MESSAGES: triage-messages
+      BEDROCK_MODEL_ID: anthropic.claude-sonnet-4-20250514-v1:0
+      MAX_TOOL_ITERATIONS: "15"
+      # Point DynamoDB to LocalStack; Bedrock + all triage tools point to real AWS
+      DYNAMODB_ENDPOINT_URL: http://localstack:4566
+      # Real AWS creds for Bedrock + read-only triage access
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    depends_on:
+      - localstack
+    volumes:
+      - ./agent-service:/app   # Hot-reload in dev
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile.dev
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8000
+    volumes:
+      - ./ui:/app
+      - /app/node_modules
+
+volumes:
+  localstack_data:
+```
+
+### 9.3 Local Bootstrap Script
+
+A `scripts/bootstrap-local.sh` script runs after `docker compose up` to create the DynamoDB tables in LocalStack:
+
+```bash
+#!/usr/bin/env bash
+# Creates DynamoDB tables in LocalStack for local development
+ENDPOINT=http://localhost:4566
+
+aws dynamodb create-table \
+  --endpoint-url $ENDPOINT \
+  --table-name triage-sessions \
+  --attribute-definitions \
+    AttributeName=PK,AttributeType=S \
+    AttributeName=SK,AttributeType=S \
+    AttributeName=user_id,AttributeType=S \
+    AttributeName=created_at,AttributeType=S \
+  --key-schema AttributeName=PK,KeyType=HASH AttributeName=SK,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST \
+  --global-secondary-indexes '[{
+    "IndexName":"user-sessions-index",
+    "KeySchema":[{"AttributeName":"user_id","KeyType":"HASH"},{"AttributeName":"created_at","KeyType":"RANGE"}],
+    "Projection":{"ProjectionType":"ALL"}
+  }]' \
+  --region us-east-1
+
+aws dynamodb create-table \
+  --endpoint-url $ENDPOINT \
+  --table-name triage-messages \
+  --attribute-definitions \
+    AttributeName=PK,AttributeType=S \
+    AttributeName=SK,AttributeType=S \
+  --key-schema AttributeName=PK,KeyType=HASH AttributeName=SK,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST \
+  --region us-east-1
+```
+
+### 9.4 .env.local Template
+
+```bash
+# Copy to .env.local — never commit this file
+# Credentials need read-only access to the AWS account being triaged
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_SESSION_TOKEN=        # Optional — for assumed roles / SSO sessions
+```
+
+### 9.5 What LocalStack Covers vs Real AWS
+
+| Concern | LocalStack (local) | Real AWS (target env) |
+|---------|-------------------|----------------------|
+| DynamoDB session tables | ✅ Emulated | ✅ Real |
+| Bedrock LLM calls | ❌ Not supported — needs real AWS | ✅ Real |
+| CloudWatch / ECS / RDS tools | ❌ Not mocked — needs real AWS creds | ✅ Real |
+| Tool unit tests | Mock boto3 responses with `moto` | N/A |
+
+For running the agent without real AWS (e.g. pure CI unit tests), use `moto` to mock individual boto3 calls in the tool layer.
+
+---
+
+## 10. Security Considerations
 
 | Concern | Mitigation |
 |---------|-----------|
 | Agent modifying resources | IAM role has zero write/mutate permissions. No `Create*`, `Update*`, `Delete*`, `Put*` (except DynamoDB own tables) |
 | Prompt injection via log data | Tool outputs are always injected as `tool` role messages, never as `user` messages. System prompt instructs model to treat tool data as untrusted |
-| Sensitive data in logs | SSM `GetParameter` only allowed for parameter discovery, not SecureString value retrieval. Agents cannot read Secrets Manager values |
-| API abuse | API Gateway rate limiting (100 req/s per IP); JWT/Cognito authentication required |
+| Sensitive data in logs | SSM `GetParametersByPath` only returns plaintext parameters; SecureString values are redacted. Secrets Manager values are never fetched |
+| API abuse | API Gateway rate limiting (100 req/s per IP) |
+| Authentication | Open in v1 (anonymous UUID per browser). Okta SSO via Cognito SAML in a future phase |
 | Container escape | Fargate provides VM-level isolation; no access to underlying host |
-| Data exfiltration | Agent runs in private subnet; no outbound internet except via controlled VPC endpoints |
+| Data exfiltration | Agent runs in private subnet; no outbound internet except via controlled VPC endpoints or NAT |
 
 ---
 
-## 10. Authentication
+## 11. Authentication
 
-The UI and API are protected by **Amazon Cognito** (User Pool + App Client):
+**v1 (current):** No authentication. Each browser generates a random UUID on first visit (stored in `localStorage`) which scopes that browser's sessions. The API has no auth middleware.
 
-- Users authenticate via Cognito Hosted UI (SAML/OIDC federation optional for SSO)
-- JWT token attached to every API request
-- API Gateway authorizer validates token
-- `user_id` extracted from JWT `sub` claim for session scoping
+**Future phase:** Okta SSO via Amazon Cognito (User Pool acting as SAML SP, Okta as IdP). When added:
+- Users authenticate via Cognito Hosted UI → Okta → SAML assertion
+- JWT token (Cognito) attached to every API request
+- API Gateway Cognito authorizer validates token
+- `user_id` switches from localStorage UUID to Okta `sub` claim
+- No DynamoDB schema changes required
 
 ---
 
-## 11. Observability
+## 12. Observability
 
 | Signal | Tooling |
 |--------|---------|
@@ -1520,20 +1694,27 @@ The UI and API are protected by **Amazon Cognito** (User Pool + App Client):
 
 ---
 
-## 12. Deployment Flow
+## 13. Deployment Flow
 
+GitHub Actions workflows are assumed to **already exist** in the repository. The agent project needs to provide:
+
+1. **`Dockerfile`** — in `agent-service/` (multi-stage build, non-root user)
+2. **Terraform modules** — in `terraform/` (Sections 7.1–7.4)
+3. **`ui/`** — React SPA build output uploaded to S3
+
+The existing GitHub Actions workflow is expected to:
 ```
-Developer → git push → CI/CD (GitHub Actions / CodePipeline)
+git push → GitHub Actions
   → docker build + push to ECR
-  → terraform plan (PR comment)
+  → terraform plan (on PR)
   → terraform apply (on merge to main)
   → ECS rolling deploy (new task def revision)
-  → CloudFront invalidation (SPA)
+  → CloudFront invalidation (SPA assets)
 ```
 
 ---
 
-## 13. Configuration Variables
+## 14. Configuration Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -1544,12 +1725,15 @@ Developer → git push → CI/CD (GitHub Actions / CodePipeline)
 | `SESSION_TTL_DAYS` | `30` | DynamoDB TTL for sessions |
 | `STREAM_TIMEOUT_SECONDS` | `300` | Max SSE connection duration |
 | `LOG_QUERY_MAX_RECORDS` | `1000` | Max records per CW Logs Insights query |
+| `DYNAMODB_ENDPOINT_URL` | `""` | Override DynamoDB endpoint (set to LocalStack URL in local dev) |
+| `USE_VPC_ENDPOINTS` | `true` | Route AWS calls through VPC endpoints in deployed env |
 
 ---
 
-## 14. Out of Scope (v1)
+## 15. Out of Scope (v1)
 
 - **Write remediation actions** — agent recommends only; no automated apply
+- **Authentication / SSO** — deferred to a future phase (Okta via Cognito SAML)
 - **Multi-account** — single AWS account only in v1; cross-account assumeRole pattern deferred
 - **Slack/PagerDuty integration** — chat UI only in v1
 - **Scheduled / alert-triggered triage** — user-initiated only in v1
@@ -1558,17 +1742,17 @@ Developer → git push → CI/CD (GitHub Actions / CodePipeline)
 
 ---
 
-## 15. Open Questions / Decisions Needed
+## 16. Open Questions / Decisions Needed
 
-| # | Question | Options | Recommendation |
-|---|----------|---------|----------------|
-| 1 | Auth provider | Cognito vs existing IdP (Okta/AzureAD) | Cognito with SAML if IdP exists |
-| 2 | SSE vs WebSocket | SSE simpler, WebSocket for bidirectional | SSE sufficient; WS if real-time cancel needed |
-| 3 | VPC: new vs existing | Create new or inject into existing | ✅ **Decided: inject into existing VPC via input variables** |
-| 4 | Multi-env (dev/prod) | Separate accounts or same account | Separate Terraform workspaces minimum |
-| 5 | Log retention | How long to keep triage sessions? | 30 days default, configurable |
-| 6 | User management | Self-service signup vs admin-provisioned | Admin-provisioned (internal tool) |
+| # | Question | Status |
+|---|----------|--------|
+| 1 | Auth provider | Deferred — Okta SSO via Cognito SAML in a future phase |
+| 2 | SSE vs WebSocket | **Decided: SSE** — sufficient for streaming; no bidirectional need |
+| 3 | VPC: new vs existing | **Decided: inject into existing VPC** via input variables |
+| 4 | Multi-env (dev/prod) | Separate Terraform workspaces with `environments/dev` and `environments/prod` tfvars |
+| 5 | Log retention | **Decided: 30 days** default, configurable via `SESSION_TTL_DAYS` |
+| 6 | User management | **Decided: admin-provisioned** (internal tool); self-service deferred with auth phase |
 
 ---
 
-*End of Specification v1.0.0*
+*End of Specification v1.1.0*

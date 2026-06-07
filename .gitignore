@@ -1,0 +1,14 @@
+.env.local
+.env
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+*.egg-info/
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+*.tfvars.local
+node_modules/
+dist/
+.DS_Store
+localstack_data/
