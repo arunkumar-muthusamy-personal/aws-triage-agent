@@ -10,14 +10,17 @@ See [SPEC.md](./SPEC.md) for the full architecture and design spec.
 
 ### Prerequisites
 - Docker + Docker Compose
-- AWS credentials with **read-only** access to the target AWS account + Bedrock `InvokeModel` permission
-- AWS CLI (for the bootstrap script)
+- OpenAI API key for local LLM calls
+- Optional: AWS credentials with **read-only** access to the target AWS account if `MOCK_AWS=false`
 
 ### 1. Configure credentials
 
 ```bash
 cp .env.local.example .env.local
-# Edit .env.local and fill in your AWS credentials
+# Edit .env.local:
+# - LLM_PROVIDER=openai
+# - OPENAI_API_KEY=...
+# - MOCK_AWS=true for a fully local fake AWS scenario, or false to use real read-only AWS APIs
 ```
 
 ### 2. Start the stack
@@ -31,16 +34,7 @@ This starts:
 - **Agent service** (FastAPI) on port 8000
 - **UI** (Vite dev server) on port 5173
 
-### 3. Create DynamoDB tables in LocalStack
-
-In a separate terminal (run once after `docker compose up`):
-
-```bash
-chmod +x scripts/bootstrap-local.sh
-./scripts/bootstrap-local.sh
-```
-
-### 4. Open the UI
+### 3. Open the UI
 
 Visit http://localhost:5173
 
@@ -79,16 +73,23 @@ aws-triage-agent/
 
 ---
 
-## AWS Credentials for Local Dev
+## LLM and AWS Credentials
 
-The agent needs two types of AWS access:
+Local development and deployed AWS use different LLM providers:
+
+| Environment | LLM provider | Required config |
+|-------------|--------------|-----------------|
+| Personal/local | OpenAI | `LLM_PROVIDER=openai`, `OPENAI_API_KEY`, optional `MOCK_AWS=true` |
+| Work/AWS | Bedrock | Terraform sets `LLM_PROVIDER=bedrock`; ECS task role needs Bedrock invoke permissions |
+
+AWS read credentials are only needed locally when `MOCK_AWS=false` and you want the tools to inspect a real AWS account.
 
 | Access | Why |
 |--------|-----|
-| `bedrock:InvokeModel` + `bedrock:InvokeModelWithResponseStream` | Calling Claude via Bedrock |
-| Read-only on all monitored services | Running triage tools (see SPEC.md §7.3 for the full IAM policy) |
+| Read-only on monitored services | Running triage tools locally against a real account |
+| `bedrock:InvokeModel` + `bedrock:InvokeModelWithResponseStream` | Calling Claude in the deployed AWS environment |
 
-The simplest approach: use a read-only IAM role in the target account and assume it locally via `AWS_SESSION_TOKEN`. The Bedrock call also needs to be in `us-east-1`.
+The simplest local AWS approach is to use a read-only IAM role and assume it via `AWS_SESSION_TOKEN`. Bedrock calls in the deployed environment use the ECS task role.
 
 ---
 
@@ -159,9 +160,14 @@ See [SPEC.md §4](./SPEC.md#4-tool-registry) for the full tool catalogue.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `LLM_PROVIDER` | `bedrock` | `openai` for local dev, `bedrock` for AWS deployment |
 | `AWS_REGION` | `us-east-1` | AWS region |
 | `BEDROCK_MODEL_ID` | `anthropic.claude-sonnet-4-20250514-v1:0` | Bedrock model |
+| `OPENAI_API_KEY` | _(empty)_ | Required when `LLM_PROVIDER=openai` |
+| `OPENAI_MODEL` | `gpt-4o` | OpenAI model for local dev |
+| `MOCK_AWS` | `false` | Return fake AWS tool data for local testing without AWS credentials |
 | `MAX_TOOL_ITERATIONS` | `15` | Max tool calls per agent loop |
+| `CORS_ALLOW_ORIGINS` | `*` | Comma-separated allowed origins for the FastAPI service |
 | `DYNAMODB_TABLE_SESSIONS` | `triage-sessions` | Session table name |
 | `DYNAMODB_TABLE_MESSAGES` | `triage-messages` | Messages table name |
 | `DYNAMODB_ENDPOINT_URL` | _(empty)_ | Override DynamoDB endpoint (set to `http://localstack:4566` in Docker Compose) |

@@ -7,6 +7,47 @@ function generateId(): string {
   return crypto.randomUUID()
 }
 
+interface MessageRecord {
+  role: string
+  content: string
+  tool_events?: ToolEvent[]
+  created_at?: string
+}
+
+function normalizeRole(role: string): Message['role'] {
+  const normalized = role.toLowerCase()
+  if (normalized === 'user' || normalized === 'assistant') return normalized
+  return 'assistant'
+}
+
+function pairToolEvents(events: ToolEvent[] = []): ToolEvent[] {
+  const paired: ToolEvent[] = []
+
+  for (const event of events) {
+    if (event.type === 'tool_start') {
+      paired.push({ ...event })
+      continue
+    }
+
+    const idx = [...paired]
+      .reverse()
+      .findIndex((e) => e.type === 'tool_start' && e.tool === event.tool && e.output === undefined)
+    const realIdx = idx !== -1 ? paired.length - 1 - idx : -1
+
+    if (realIdx !== -1) {
+      paired[realIdx] = {
+        ...paired[realIdx],
+        output: event.output,
+        duration_ms: event.duration_ms,
+      }
+    } else {
+      paired.push({ ...event })
+    }
+  }
+
+  return paired
+}
+
 export function useSSEChat(userId: string) {
   const [messages, setMessages] = useState<Message[]>([])
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
@@ -25,11 +66,11 @@ export function useSSEChat(userId: string) {
       setCurrentSessionId(sessionId)
       // API returns a flat array of MessageRecord objects
       if (Array.isArray(data)) {
-        const loaded: Message[] = data.map((m: { role: string; content: string; tool_events?: ToolEvent[]; created_at?: string }) => ({
+        const loaded: Message[] = (data as MessageRecord[]).map((m) => ({
           id: generateId(),
-          role: m.role as Message['role'],
+          role: normalizeRole(m.role),
           content: m.content,
-          toolEvents: m.tool_events ?? [],
+          toolEvents: pairToolEvents(m.tool_events),
           isStreaming: false,
           createdAt: m.created_at ? new Date(m.created_at) : new Date(),
         }))

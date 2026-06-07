@@ -1,7 +1,7 @@
 # AWS Triage Agent — Application Specification
 
 **Version:** 1.1.0  
-**Status:** Design / Pre-Build  
+**Status:** MVP Implementation / Active Build  
 **Owner:** Infrastructure / Platform Team  
 
 ---
@@ -23,7 +23,7 @@ A conversational AI triage agent that acts as an intelligent on-call assistant. 
 - **Clarification-first.** When intent is ambiguous, the agent asks targeted clarifying questions before issuing any AWS API calls.
 - **Reproducible infrastructure.** Everything deployable via Terraform; no click-ops.
 - **Audit trail.** Every tool invocation and its raw output are stored, accessible, and surfaced in the UI.
-- **Portable build.** The agent is built and tested locally (Docker Compose + LocalStack), committed to GitHub, and pulled into the target AWS environment for deployment. No direct AWS access is required during development.
+- **Portable build.** The agent is built and tested locally (Docker Compose + LocalStack), committed to GitHub, and pulled into the target AWS environment for deployment. Local development can use OpenAI for LLM calls and mock AWS tool responses; the deployed work environment uses AWS Bedrock.
 
 ---
 
@@ -77,13 +77,13 @@ A conversational AI triage agent that acts as an intelligent on-call assistant. 
 | Static Hosting | S3 + CloudFront | Serve the SPA globally |
 | API Layer | API Gateway (HTTP API) | Route chat messages; stream agent responses via SSE |
 | Agent Service | FastAPI + LangGraph + Python | Core agentic loop + tool execution |
-| LLM | AWS Bedrock (Claude claude-sonnet-4-20250514) | Reasoning, tool-call orchestration, diagnosis |
+| LLM | OpenAI locally; AWS Bedrock in deployed AWS | Reasoning, tool-call orchestration, diagnosis |
 | Conversation State | DynamoDB | Persist session history, tool call logs |
 | Infrastructure | Terraform | All AWS resources defined as code |
 | Container Registry | ECR | Agent Docker image |
 | Secrets | AWS Secrets Manager | API keys, config (if any) |
 | Observability | CloudWatch Logs + X-Ray | Agent's own telemetry |
-| Local Dev | Docker Compose + LocalStack | Run the full stack locally without an AWS account |
+| Local Dev | Docker Compose + LocalStack + OpenAI | Run the full stack locally; use `MOCK_AWS=true` for fake AWS tool data or read-only AWS credentials for real AWS APIs |
 
 ### 2.3 Deployment Model
 
@@ -107,10 +107,24 @@ The **developer does not need access to the target AWS account**. The target env
 LangGraph is chosen because:
 - Native support for **cyclic graphs** (the agent loop with tool calls)
 - First-class **streaming** support — tokens and tool events stream back to the UI
-- Built-in **checkpointing** compatible with DynamoDB (conversation memory)
-- Tool-calling with AWS Bedrock via LangChain's `ChatBedrockConverse`
+- Tool-calling with OpenAI locally via `ChatOpenAI`
+- Tool-calling with AWS Bedrock in AWS deployments via `ChatBedrockConverse`
+
+Current MVP state is persisted by the application session manager in DynamoDB. LangGraph process-local checkpointing is intentionally not used, so ECS restarts do not leave the graph with divergent in-memory state.
 
 ### 3.2 Agent State Machine
+
+**Current MVP implementation:** a compact two-node LangGraph loop:
+
+```
+START
+  -> agent node (LLM bound to all read-only AWS tools)
+  -> tools node (execute requested tool calls)
+  -> agent node (continue reasoning with tool output)
+  -> END when no tool calls remain or MAX_TOOL_ITERATIONS is reached
+```
+
+The richer classifier / planner / synthesizer graph below remains the target design for a later hardening phase.
 
 ```
          ┌──────────────┐
@@ -1154,6 +1168,7 @@ Attributes:
   updated_at: ISO8601
   status: ACTIVE | CLOSED
   message_count: int
+  ttl_expiry: int             # DynamoDB TTL epoch seconds
 ```
 
 **Table: `triage-messages`**
@@ -1168,9 +1183,11 @@ Attributes:
   role: USER | ASSISTANT | TOOL
   content: str               # Markdown text
   tool_calls: list[ToolCall] # If role=ASSISTANT with tool use
+  tool_events: list[ToolEvent] # Persisted Evidence Trail events for UI reload
   tool_result: dict          # If role=TOOL
   tokens_used: int
   created_at: ISO8601
+  ttl_expiry: int             # DynamoDB TTL epoch seconds
 ```
 
 **GSI:** `user-sessions-index` on `user_id` + `created_at` for session listing.
@@ -1231,6 +1248,7 @@ resource "aws_ecs_task_definition" "triage_agent" {
       { name = "DYNAMODB_TABLE_MESSAGES",  value = aws_dynamodb_table.messages.name },
       { name = "BEDROCK_MODEL_ID",         value = "anthropic.claude-sonnet-4-20250514-v1:0" },
       { name = "MAX_TOOL_ITERATIONS",      value = "15" },
+      { name = "LLM_PROVIDER",             value = "bedrock" },
       { name = "USE_VPC_ENDPOINTS",        value = tostring(var.use_vpc_endpoints) }
     ]
     logConfiguration = {
@@ -1492,8 +1510,7 @@ agent-service/
 │   │   └── tagging.py                # 4.26 — Resource Groups Tagging API
 │   │
 │   ├── memory/
-│   │   ├── dynamodb_checkpointer.py  # LangGraph DynamoDB checkpointer
-│   │   └── session_manager.py
+│   │   └── session_manager.py        # DynamoDB sessions, messages, tool evidence
 │   │
 │   └── api/
 │       ├── routes.py          # /chat/stream, /sessions, /sessions/{id}
@@ -1515,6 +1532,7 @@ agent-service/
 ```python
 class AgentState(TypedDict):
     session_id: str
+    user_id: str
     messages: list[BaseMessage]          # Full conversation history
     tool_calls_made: int                  # Guard against infinite loops
     clarification_rounds: int             # Max 2
@@ -1530,7 +1548,9 @@ class AgentState(TypedDict):
 
 ### 9.1 Overview
 
-Developers run the full stack locally using Docker Compose. LocalStack emulates the AWS services needed for the agent's own infrastructure (DynamoDB session tables). For the **target AWS services being triaged** (CloudWatch, ECS, RDS, etc.), the agent points to a real AWS account via injected credentials — or uses LocalStack's mock responses for unit testing the tool layer.
+**Current implementation note:** local development uses `LLM_PROVIDER=openai` by default. Set `MOCK_AWS=true` for a fully local fake AWS triage scenario, or set `MOCK_AWS=false` plus read-only AWS credentials to inspect a real AWS account. Deployed AWS environments set `LLM_PROVIDER=bedrock`.
+
+Developers run the full stack locally using Docker Compose. LocalStack emulates the app's DynamoDB session/message tables; target AWS tool responses come from built-in mock fixtures or real AWS APIs depending on `MOCK_AWS`.
 
 ```
 docker compose up
@@ -1567,9 +1587,14 @@ services:
       DYNAMODB_TABLE_MESSAGES: triage-messages
       BEDROCK_MODEL_ID: anthropic.claude-sonnet-4-20250514-v1:0
       MAX_TOOL_ITERATIONS: "15"
-      # Point DynamoDB to LocalStack; Bedrock + all triage tools point to real AWS
+      LLM_PROVIDER: openai
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      MOCK_AWS: ${MOCK_AWS:-true}
+      CORS_ALLOW_ORIGINS: http://localhost:5173
+      # Point DynamoDB to LocalStack; triage tools use mock data or real AWS based on MOCK_AWS.
       DYNAMODB_ENDPOINT_URL: http://localstack:4566
-      # Real AWS creds for Bedrock + read-only triage access
+      # Optional real AWS creds for read-only triage access when MOCK_AWS=false.
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
@@ -1594,9 +1619,9 @@ volumes:
   localstack_data:
 ```
 
-### 9.3 Local Bootstrap Script
+### 9.3 Local DynamoDB Table Creation
 
-A `scripts/bootstrap-local.sh` script runs after `docker compose up` to create the DynamoDB tables in LocalStack:
+The application creates LocalStack DynamoDB tables automatically when `DYNAMODB_ENDPOINT_URL` is configured. The legacy `scripts/bootstrap-local.sh` script can still be used manually for troubleshooting or one-off table recreation:
 
 ```bash
 #!/usr/bin/env bash
@@ -1635,7 +1660,14 @@ aws dynamodb create-table \
 
 ```bash
 # Copy to .env.local — never commit this file
-# Credentials need read-only access to the AWS account being triaged
+# Local defaults
+LLM_PROVIDER=openai
+MOCK_AWS=true
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o
+CORS_ALLOW_ORIGINS=http://localhost:5173
+
+# Required only when MOCK_AWS=false and local tools should query a real AWS account.
 AWS_ACCESS_KEY_ID=
 AWS_SECRET_ACCESS_KEY=
 AWS_SESSION_TOKEN=        # Optional — for assumed roles / SSO sessions
@@ -1643,11 +1675,13 @@ AWS_SESSION_TOKEN=        # Optional — for assumed roles / SSO sessions
 
 ### 9.5 What LocalStack Covers vs Real AWS
 
+Current implementation note: LocalStack covers the app's DynamoDB tables. Local LLM calls use OpenAI, not Bedrock. AWS triage tools use built-in fake data when `MOCK_AWS=true`; otherwise they call real AWS APIs with read-only credentials.
+
 | Concern | LocalStack (local) | Real AWS (target env) |
 |---------|-------------------|----------------------|
 | DynamoDB session tables | ✅ Emulated | ✅ Real |
-| Bedrock LLM calls | ❌ Not supported — needs real AWS | ✅ Real |
-| CloudWatch / ECS / RDS tools | ❌ Not mocked — needs real AWS creds | ✅ Real |
+| LLM calls | OpenAI via `LLM_PROVIDER=openai` | Bedrock via `LLM_PROVIDER=bedrock` |
+| CloudWatch / ECS / RDS tools | Built-in fake data with `MOCK_AWS=true`, or real AWS with read-only creds | ✅ Real |
 | Tool unit tests | Mock boto3 responses with `moto` | N/A |
 
 For running the agent without real AWS (e.g. pure CI unit tests), use `moto` to mock individual boto3 calls in the tool layer.
@@ -1718,13 +1752,18 @@ git push → GitHub Actions
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `LLM_PROVIDER` | `bedrock` | `openai` for local dev, `bedrock` for AWS deployment |
 | `AWS_REGION` | `us-east-1` | AWS region |
 | `BEDROCK_MODEL_ID` | `anthropic.claude-sonnet-4-20250514-v1:0` | Bedrock model |
+| `OPENAI_API_KEY` | `""` | Required when `LLM_PROVIDER=openai` |
+| `OPENAI_MODEL` | `gpt-4o` | OpenAI model used for local development |
+| `MOCK_AWS` | `false` | Return fake AWS tool data for local testing without AWS credentials |
 | `MAX_TOOL_ITERATIONS` | `15` | Max tool calls per agent loop |
 | `MAX_CLARIFICATION_ROUNDS` | `2` | Max rounds of clarification before proceeding |
 | `SESSION_TTL_DAYS` | `30` | DynamoDB TTL for sessions |
 | `STREAM_TIMEOUT_SECONDS` | `300` | Max SSE connection duration |
 | `LOG_QUERY_MAX_RECORDS` | `1000` | Max records per CW Logs Insights query |
+| `CORS_ALLOW_ORIGINS` | `*` | Comma-separated FastAPI CORS allow-list |
 | `DYNAMODB_ENDPOINT_URL` | `""` | Override DynamoDB endpoint (set to LocalStack URL in local dev) |
 | `USE_VPC_ENDPOINTS` | `true` | Route AWS calls through VPC endpoints in deployed env |
 

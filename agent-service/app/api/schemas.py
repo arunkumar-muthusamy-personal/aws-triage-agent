@@ -24,6 +24,7 @@ class MessageRecord(BaseModel):
     role: Literal["USER", "ASSISTANT", "TOOL"]
     content: str
     tool_calls: Optional[list] = None
+    tool_events: Optional[list] = None
     tool_result: Optional[dict] = None
     tokens_used: Optional[int] = None
     created_at: str

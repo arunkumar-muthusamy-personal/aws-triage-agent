@@ -1,33 +1,55 @@
 import json
+import time
 import uuid
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
+from langchain_core.messages import AIMessage, HumanMessage
 from sse_starlette import EventSourceResponse
 
-from app.api.schemas import ChatRequest, SessionSummary, MessageRecord
-from app.memory.session_manager import SessionManager
 from app.agent.graph import graph
 from app.agent.nodes import format_system_message
-from langchain_core.messages import HumanMessage
+from app.api.schemas import ChatRequest, MessageRecord, SessionSummary
+from app.memory.session_manager import SessionManager
 
 router = APIRouter()
 session_manager = SessionManager()
 
 
+def _json_safe(value):
+    try:
+        return json.loads(json.dumps(value, default=str))
+    except Exception:
+        return str(value)
+
+
+def _coerce_tool_output(raw_output):
+    output = raw_output.content if hasattr(raw_output, "content") else raw_output
+    if isinstance(output, str):
+        try:
+            return json.loads(output)
+        except json.JSONDecodeError:
+            return output
+    return _json_safe(output)
+
+
 async def stream_agent(request: ChatRequest, session_id: str) -> AsyncGenerator[dict, None]:
     try:
-        # Load message history
         stored_messages = session_manager.get_messages(session_id)
 
-        # Build message list
         messages = [format_system_message()]
         for msg in stored_messages:
             if msg["role"] == "USER":
                 messages.append(HumanMessage(content=msg["content"]))
-            # ASSISTANT and TOOL messages are managed by LangGraph checkpointer internally
+            elif msg["role"] == "ASSISTANT":
+                messages.append(AIMessage(content=msg["content"]))
 
         messages.append(HumanMessage(content=request.message))
+        session_manager.save_message(
+            session_id=session_id,
+            role="USER",
+            content=request.message,
+        )
 
         state_input = {
             "session_id": session_id,
@@ -43,6 +65,8 @@ async def stream_agent(request: ChatRequest, session_id: str) -> AsyncGenerator[
 
         config = {"configurable": {"thread_id": session_id}}
         full_response_parts = []
+        tool_events = []
+        tool_started_at = {}
 
         async for event in graph.astream_events(state_input, config=config, version="v2"):
             kind = event.get("event")
@@ -57,33 +81,41 @@ async def stream_agent(request: ChatRequest, session_id: str) -> AsyncGenerator[
 
             elif kind == "on_tool_start":
                 tool_name = event.get("name", "unknown")
-                tool_input = event.get("data", {}).get("input", {})
-                # tool_input may contain non-serialisable objects — coerce safely
-                try:
-                    input_serialisable = json.loads(json.dumps(tool_input, default=str))
-                except Exception:
-                    input_serialisable = str(tool_input)
+                run_id = event.get("run_id") or str(uuid.uuid4())
+                tool_input = _json_safe(event.get("data", {}).get("input", {}))
+                tool_started_at[run_id] = time.monotonic()
+                tool_events.append(
+                    {
+                        "type": "tool_start",
+                        "tool": tool_name,
+                        "input": tool_input,
+                    }
+                )
                 yield {
                     "event": "tool_start",
-                    "data": json.dumps({"tool": tool_name, "input": input_serialisable}),
+                    "data": json.dumps({"tool": tool_name, "input": tool_input}),
                 }
 
             elif kind == "on_tool_end":
                 tool_name = event.get("name", "unknown")
-                raw_output = event.get("data", {}).get("output")
-                # In LangGraph v2 events, tool output is a ToolMessage object
-                if hasattr(raw_output, "content"):
-                    output_str = raw_output.content
-                elif isinstance(raw_output, str):
-                    output_str = raw_output
-                else:
-                    try:
-                        output_str = json.dumps(raw_output, default=str)
-                    except Exception:
-                        output_str = str(raw_output)
+                run_id = event.get("run_id")
+                output = _coerce_tool_output(event.get("data", {}).get("output"))
+                started_at = tool_started_at.pop(run_id, None) if run_id else None
+                duration_ms = int((time.monotonic() - started_at) * 1000) if started_at else None
+                tool_events.append(
+                    {
+                        "type": "tool_end",
+                        "tool": tool_name,
+                        "output": output,
+                        "duration_ms": duration_ms,
+                    }
+                )
                 yield {
                     "event": "tool_end",
-                    "data": json.dumps({"tool": tool_name, "output": output_str}),
+                    "data": json.dumps(
+                        {"tool": tool_name, "output": output, "duration_ms": duration_ms},
+                        default=str,
+                    ),
                 }
 
         full_response = "".join(full_response_parts)
@@ -91,6 +123,7 @@ async def stream_agent(request: ChatRequest, session_id: str) -> AsyncGenerator[
             session_id=session_id,
             role="ASSISTANT",
             content=full_response,
+            tool_events=tool_events,
         )
         yield {"event": "done", "data": json.dumps({"session_id": session_id})}
 
@@ -102,7 +135,6 @@ async def stream_agent(request: ChatRequest, session_id: str) -> AsyncGenerator[
 async def chat_stream(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
 
-    # Create session if new
     existing = session_manager.get_session(session_id)
     if not existing:
         title = request.message[:80]
@@ -111,13 +143,6 @@ async def chat_stream(request: ChatRequest):
             session_id=session_id,
             title=title,
         )
-
-    # Save user message
-    session_manager.save_message(
-        session_id=session_id,
-        role="USER",
-        content=request.message,
-    )
 
     return EventSourceResponse(stream_agent(request, session_id))
 

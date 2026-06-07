@@ -6,7 +6,12 @@ interface Props {
 }
 
 function truncate(str: string, max = 500): string {
-  return str.length > max ? str.slice(0, max) + '…' : str
+  return str.length > max ? str.slice(0, max) + '...' : str
+}
+
+function formatJson(value: unknown): string {
+  const formatted = JSON.stringify(value, null, 2)
+  return formatted ?? String(value)
 }
 
 export function EvidenceTrail({ toolEvents }: Props) {
@@ -15,7 +20,6 @@ export function EvidenceTrail({ toolEvents }: Props) {
 
   if (toolEvents.length === 0) return null
 
-  // Count unique tool calls (tool_start events)
   const toolCount = toolEvents.filter((e) => e.type === 'tool_start').length
 
   return (
@@ -24,7 +28,7 @@ export function EvidenceTrail({ toolEvents }: Props) {
         onClick={() => setOpen((o) => !o)}
         className="text-xs text-gray-400 hover:text-gray-200 transition-colors flex items-center gap-1"
       >
-        <span>{open ? '▼' : '▶'}</span>
+        <span>{open ? 'v' : '>'}</span>
         <span>Evidence Trail ({toolCount} tool call{toolCount !== 1 ? 's' : ''})</span>
       </button>
 
@@ -33,7 +37,7 @@ export function EvidenceTrail({ toolEvents }: Props) {
           {toolEvents
             .filter((e) => e.type === 'tool_start')
             .map((event, idx) => {
-              const hasDuration = event.duration_ms !== undefined
+              const hasDuration = typeof event.duration_ms === 'number'
               const isPending = !hasDuration && event.output === undefined
 
               return (
@@ -42,9 +46,9 @@ export function EvidenceTrail({ toolEvents }: Props) {
                     onClick={() => setExpandedIdx(expandedIdx === idx ? null : idx)}
                     className="w-full text-left text-xs text-gray-400 hover:text-gray-200 transition-colors font-mono"
                   >
-                    <span className="text-gray-600">├─ </span>
+                    <span className="text-gray-600">|- </span>
                     <span className="text-blue-400">{event.tool}</span>
-                    <span className="text-gray-500"> → </span>
+                    <span className="text-gray-500"> - </span>
                     {isPending ? (
                       <span className="text-yellow-500">...</span>
                     ) : (
@@ -63,15 +67,15 @@ export function EvidenceTrail({ toolEvents }: Props) {
                         <div>
                           <div className="text-xs text-gray-500 mb-1">Input:</div>
                           <pre className="text-xs text-gray-300 whitespace-pre-wrap break-all">
-                            {truncate(JSON.stringify(event.input, null, 2))}
+                            {truncate(formatJson(event.input))}
                           </pre>
                         </div>
                       )}
-                      {event.output && (
+                      {event.output !== undefined && (
                         <div className="mt-2">
                           <div className="text-xs text-gray-500 mb-1">Output:</div>
                           <pre className="text-xs text-gray-300 whitespace-pre-wrap break-all">
-                            {truncate(JSON.stringify(event.output, null, 2))}
+                            {truncate(formatJson(event.output))}
                           </pre>
                         </div>
                       )}

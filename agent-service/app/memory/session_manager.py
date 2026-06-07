@@ -17,12 +17,17 @@ class SessionManager:
             kwargs["endpoint_url"] = settings.dynamodb_endpoint_url
 
         self._dynamodb = boto3.resource("dynamodb", **kwargs)
-        self._ensure_tables()
+        if settings.dynamodb_endpoint_url:
+            self._ensure_tables()
         self._sessions_table = self._dynamodb.Table(settings.dynamodb_table_sessions)
         self._messages_table = self._dynamodb.Table(settings.dynamodb_table_messages)
 
     def _ensure_tables(self) -> None:
-        """Create DynamoDB tables if they don't exist. Safe to call on every startup."""
+        """Create local DynamoDB tables if they don't exist.
+
+        Production tables are managed by Terraform. This path is for LocalStack
+        only, where the endpoint URL is explicitly configured.
+        """
         client = self._dynamodb.meta.client
 
         # ── triage-sessions ───────────────────────────────────────────────────
@@ -54,7 +59,7 @@ class SessionManager:
             # Enable TTL
             client.update_time_to_live(
                 TableName=settings.dynamodb_table_sessions,
-                TimeToLiveSpecification={"Enabled": True, "AttributeName": "ttl"},
+                TimeToLiveSpecification={"Enabled": True, "AttributeName": "ttl_expiry"},
             )
         except client.exceptions.ResourceInUseException:
             pass  # Table already exists — nothing to do
@@ -75,7 +80,7 @@ class SessionManager:
             )
             client.update_time_to_live(
                 TableName=settings.dynamodb_table_messages,
-                TimeToLiveSpecification={"Enabled": True, "AttributeName": "ttl"},
+                TimeToLiveSpecification={"Enabled": True, "AttributeName": "ttl_expiry"},
             )
         except client.exceptions.ResourceInUseException:
             pass  # Table already exists — nothing to do
@@ -100,7 +105,7 @@ class SessionManager:
             "updated_at": now,
             "status": "active",
             "message_count": 0,
-            "ttl": self._ttl(),
+            "ttl_expiry": self._ttl(),
         }
         self._sessions_table.put_item(Item=item)
         return item
@@ -154,6 +159,7 @@ class SessionManager:
         role: str,
         content: str,
         tool_calls: Optional[list] = None,
+        tool_events: Optional[list] = None,
         tool_result: Optional[dict] = None,
         tokens_used: Optional[int] = None,
     ) -> dict:
@@ -168,10 +174,12 @@ class SessionManager:
             "role": role,
             "content": content,
             "created_at": now,
-            "ttl": self._ttl(),
+            "ttl_expiry": self._ttl(),
         }
         if tool_calls is not None:
             item["tool_calls"] = tool_calls
+        if tool_events is not None:
+            item["tool_events"] = tool_events
         if tool_result is not None:
             item["tool_result"] = tool_result
         if tokens_used is not None:
@@ -213,6 +221,7 @@ class SessionManager:
             "role": item.get("role", "USER"),
             "content": item.get("content", ""),
             "tool_calls": item.get("tool_calls"),
+            "tool_events": item.get("tool_events"),
             "tool_result": item.get("tool_result"),
             "tokens_used": item.get("tokens_used"),
             "created_at": item.get("created_at", ""),

@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     session_ttl_days: int = 30
     stream_timeout_seconds: int = 300
     log_query_max_records: int = 1000
+    cors_allow_origins: str = "*"
 
     # ── Mock mode (local dev without real AWS creds) ──────────────────────────
     # When True, all AWS triage tools return realistic fake data.

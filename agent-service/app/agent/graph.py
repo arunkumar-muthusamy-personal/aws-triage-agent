@@ -1,6 +1,5 @@
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
-from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import AIMessage
 from langchain_core.language_models import BaseChatModel
 
@@ -82,5 +81,4 @@ workflow.add_conditional_edges(
 
 workflow.add_edge("tools", "agent")
 
-checkpointer = MemorySaver()
-graph = workflow.compile(checkpointer=checkpointer)
+graph = workflow.compile()

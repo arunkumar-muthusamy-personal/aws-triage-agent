@@ -2,8 +2,8 @@ export interface ToolEvent {
   type: 'tool_start' | 'tool_end'
   tool: string
   input?: Record<string, unknown>
-  output?: Record<string, unknown>
-  duration_ms?: number
+  output?: unknown
+  duration_ms?: number | null
 }
 
 export interface Message {
